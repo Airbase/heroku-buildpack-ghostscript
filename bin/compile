@@ -1,18 +1,51 @@
 #!/usr/bin/env bash
 # bin/compile <build-dir> <cache-dir>
+set -euo pipefail
 
-echo "-----> Installing Ghostscript 10.08.0"
+GS_VERSION="10.08.0"
+GS_TAG="gs10080"
+PACKAGE="https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/${GS_TAG}/ghostscript-${GS_VERSION}.tar.gz"
 
 BUILD_DIR=$1
-PACKAGE="https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10080/ghostscript-10.08.0.tar.gz"
-BINARY="ghostscript-10.08.0/gs-10.08.0"
-LOCATION="$BUILD_DIR/vendor/gs/bin"
+CACHE_DIR=$2
 
-mkdir -p $LOCATION
-curl $PACKAGE -L -s -o - | tar xzf - -C $LOCATION
-mv $LOCATION/$BINARY $LOCATION/gs
+# Ghostscript bakes its resource/font paths in at configure time, and the app runs from /app.
+RUNTIME_PREFIX="/app/vendor/gs"
+CACHED_INSTALL="$CACHE_DIR/gs-${GS_VERSION}-install"
+LOCATION="$BUILD_DIR/vendor/gs"
+
+echo "-----> Installing Ghostscript ${GS_VERSION}"
+
+if [ ! -x "$CACHED_INSTALL$RUNTIME_PREFIX/bin/gs" ]; then
+  WORK_DIR=$(mktemp -d)
+  LOG="$WORK_DIR/build.log"
+  trap 'rm -rf "$WORK_DIR"' EXIT
+
+  echo "       Compiling from source (cached for later deploys)"
+  curl -fsSL "$PACKAGE" | tar xz -C "$WORK_DIR"
+
+  (
+    cd "$WORK_DIR/ghostscript-${GS_VERSION}"
+    ./configure --prefix="$RUNTIME_PREFIX" --without-tesseract --without-libpaper
+    make -j"$(nproc)"
+    make install DESTDIR="$WORK_DIR/install"
+  ) > "$LOG" 2>&1 || {
+    echo " !     Ghostscript build failed, last 100 lines of the log:"
+    tail -n 100 "$LOG"
+    exit 1
+  }
+
+  rm -rf "$CACHE_DIR/gs-"*-install
+  mkdir -p "$CACHED_INSTALL"
+  cp -a "$WORK_DIR/install/." "$CACHED_INSTALL/"
+else
+  echo "       Using cached build"
+fi
+
+mkdir -p "$LOCATION"
+cp -a "$CACHED_INSTALL$RUNTIME_PREFIX/." "$LOCATION/"
 
 echo "-----> Building runtime environment for Ghostscript"
 
-mkdir -p $BUILD_DIR/.profile.d
-echo "export PATH=\"\$HOME/vendor/gs/bin:\$PATH\"" > $BUILD_DIR/.profile.d/ghostscript.sh
+mkdir -p "$BUILD_DIR/.profile.d"
+echo 'export PATH="$HOME/vendor/gs/bin:$PATH"' > "$BUILD_DIR/.profile.d/ghostscript.sh"
